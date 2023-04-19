@@ -18,6 +18,7 @@ typedef struct {
 
 DataIMU dataIMU;
 long lastTime;
+long startTime;
 long lastInterval;
 bool trainingOn;
 
@@ -131,7 +132,8 @@ void onCurrentTimeServiceReceived(BLEDevice central, BLECharacteristic character
       sprintf(dateDir, "/%04u%02u%02u", year, month, day);
       prepareSession(dateDir);
       calibrateIMU( 250, 250);
-      lastTime = millis();
+      startTime = millis();
+      lastTime  = millis();
     }
   }
 }
@@ -204,7 +206,7 @@ void SaveCalculations(long timestamp) {
       }
    }
 
-  sessionFile.println(String(timestamp) + " ; " + String(roll) + " ; " + String(pitch) + " ; " + String(yaw));
+  sessionFile.println(String(timestamp  - startTime) + " ; " + String(roll) + " ; " + String(pitch) + " ; " + String(yaw));
   sessionFile.close();
   lastTime = timestamp;
 }
@@ -314,9 +316,9 @@ void loop() {
           BLE.poll();
 
           if ( readIMU() && trainingOn) {
-            long currentTime = micros();
+            long currentTime = millis();
             lastInterval = currentTime - lastTime;
-            if (lastInterval > 2000) {
+            if (lastInterval >= 200) {
               doImuCalculations();
               SaveCalculations(currentTime);
             }
