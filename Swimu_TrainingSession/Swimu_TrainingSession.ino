@@ -20,7 +20,10 @@ DataIMU dataIMU;
 long lastTime;
 long startTime;
 long lastInterval;
-bool trainingOn;
+
+// The sensor has 3 possible states
+enum {waiting, bleConnected, savingSession, sessionTransfer};
+unsigned char state = waiting; // What the sensor is doing
 
 /************************* LED Status *********************************/
 const int LedRGBOnValue  = LOW;
@@ -48,6 +51,7 @@ BLEDescriptor descriptorCurrentTimeService( characteristicCurrentTimeServiceGATT
 #define DATA_DIR "SWIMU/SESSIONS"
 #define SD_PIN 3                           // PIN do cartão SD
 
+String sessionFileName;
 float temperature, pressure, altitude;        
 float magnetic_x, magnetic_y, magnetic_z;
 float humidity;
@@ -60,9 +64,6 @@ float accelX,            accelY,             accelZ,            // units m/s/s i
       complementaryRoll, complementaryPitch, complementaryYaw;  // units degrees (excellent roll, pitch, yaw minor drift)
 uint8_t roll, pitch, yaw;
 bool SDready;
-char sessionFileName[23];
-
-long lastSave = 0;
 
 /************************* LED Status *********************************/
 void initLED(const int ledPin) {
@@ -83,8 +84,6 @@ void setupBLE(){
 
     if ( !BLE.begin() ) {
         DebugMessagePrintf( "Starting Bluetooth® Low Energy module failed!\n" );
-
-        // Turn on the Red LED on to indicate that there was an error on setup
         while ( 1 ) {
             myBlink( LEDR, 1000 );
         }
@@ -112,28 +111,19 @@ void setupBLE(){
 }
 
 void onCurrentTimeServiceReceived(BLEDevice central, BLECharacteristic characteristic) {
-  DebugMessagePrintf( "?");
 
-  if (!trainingOn && characteristic == characteristicCurrentTimeService) {
+  if (characteristic == characteristicCurrentTimeService) {
     uint8_t value[20];
     int bytesRead = characteristic.readValue(value, 20);
 
     uint16_t year  = (value[1] << 8) | value[0];
     uint8_t month  = value[2];
     uint8_t day    = value[3];
-    uint8_t hour   = value[4];
-    uint8_t minute = value[5];
-    uint8_t second = value[6];
     
     if (SDready) {
-      sprintf(sessionFileName, "/%04u%02u%02u/%02u%02u%02u.txt", year, month, day, value[4], value[5], value[6]);
-      DebugMessagePrintf( "String: %s \n", sessionFileName);
-      char dateDir[9];
-      sprintf(dateDir, "/%04u%02u%02u", year, month, day);
-      prepareSession(dateDir);
-      calibrateIMU( 250, 250);
-      startTime = millis();
-      lastTime  = millis();
+      char dateTimeVal[19];
+      sprintf(dateTimeVal, "%04u-%02u-%02u %02u:%02u:%02u", year, month, day, value[4], value[5], value[6]);
+      prepareSession(dateTimeVal);
     }
   }
 }
@@ -153,6 +143,8 @@ void setupSD(){
         DebugMessagePrintf("Create Directory failed\n");
       }
       File myFile = SD.open(String(DATA_DIR) + "/tosave.txt", FILE_WRITE);
+      myFile.seek(0);
+      myFile.print("0");
       myFile.close();
     }
 
@@ -160,39 +152,40 @@ void setupSD(){
     Serial.println("All ready!\n");
 }
 
-void prepareSession(char* dateDir) {
+void prepareSession(char* dateTimeVal) {
   DebugMessagePrintf("\nNow starting session file\n")
 
-  if(!SD.exists(String(DATA_DIR) + String(dateDir))) {
-    SD.mkdir(String(DATA_DIR) + String(dateDir));
+  File toSaveFile = SD.open(String(DATA_DIR) + "/tosave.txt");
+  if(toSaveFile) { 
+    int sessionNum = toSaveFile.parseInt();
+    toSaveFile.close();
+    
+    sessionFileName = "/" + String(sessionNum) + ".txt";
+    File sessionFile = SD.open(String(DATA_DIR) + String(sessionFileName), FILE_WRITE);
+    if(sessionFile) { 
+      sessionFile.println(String(dateTimeVal));
+      sessionFile.println("timestamp ; roll ; pitch ; yaw");
+      sessionFile.close();
+
+      sessionNum++;
+      if (sessionNum > 999999) sessionNum = 0;
+      toSaveFile = SD.open(String(DATA_DIR) + "/tosave.txt", O_RDWR);
+      toSaveFile.seek(0);
+      toSaveFile.print(sessionNum);
+      toSaveFile.close();
+
+      DebugMessagePrintf("\nTraining Started\n")
+      myBlink( LEDB, 1000 );
+      calibrateIMU( 250, 250);
+      startTime = millis();
+      lastTime  = millis();
+      state = savingSession;
+      return;
+    }
   }
-  
-  File sessionFile = SD.open(String(DATA_DIR) + String(sessionFileName), FILE_WRITE);
-
-  if(!sessionFile) { 
-      DebugMessagePrintf( "Session failed to start!\n" );
-      while ( 1 ) {
-          myBlink( LEDR, 500 );
-      }
-   }
-  
-  sessionFile.println("timestamp ; roll ; pitch ; yaw");
-  sessionFile.close();
-
-  File toSaveFile = SD.open(String(DATA_DIR) + "/tosave.txt", FILE_WRITE);
-
-  if(!toSaveFile) { 
-    DebugMessagePrintf( "Session failed to start!\n" );
-      while ( 1 ) {
-          myBlink( LEDR, 500 );
-      }
-  }
-  toSaveFile.println(sessionFileName);
-  toSaveFile.close();
-
-  DebugMessagePrintf("\nTraining Started\n")
-  myBlink( LEDB, 1000 );
-  trainingOn = true;
+  DebugMessagePrintf( "Session failed to start!\n" );
+  digitalWrite(LEDB, LedRGBOffValue );
+  state = waiting;
 }
 
 void SaveCalculations(long timestamp) {
@@ -201,13 +194,12 @@ void SaveCalculations(long timestamp) {
 
   if(!sessionFile) { 
       DebugMessagePrintf( "Failed to save!\n" );
-      while ( 1 ) {
-          myBlink( LEDR, 500 );
-      }
+      myBlink( LEDR, 500 );
+   } else {
+      sessionFile.println(String(timestamp  - startTime) + " ; " + String(roll) + " ; " + String(pitch) + " ; " + String(yaw));
+      sessionFile.close();
    }
-
-  sessionFile.println(String(timestamp  - startTime) + " ; " + String(roll) + " ; " + String(pitch) + " ; " + String(yaw));
-  sessionFile.close();
+   
   lastTime = timestamp;
 }
 
@@ -215,8 +207,7 @@ void SaveCalculations(long timestamp) {
 void setup() {
     DebugDelay( 1000 );
     DebugSerialBeginNoBlock( 115200 );
-
-    trainingOn = false;
+    Serial.begin(9600);
 
     DebugMessagePrintf( "Serial port is ready.\n" );
     DebugMessagePrintf( "Configuring Builtin LED...\n" );
@@ -233,6 +224,7 @@ void setup() {
         }
     }
 
+  //  usb.init();
     setupSD();
     setupBLE();
 }
@@ -302,31 +294,61 @@ void doImuCalculations() {
 }
 
 void loop() {
-    // Wait for a BLE central to connect
-    BLEDevice central = BLE.central();
-
-    // If central is connected to peripheral
-    if ( central ) {
+  BLEDevice central = BLE.central();
+      
+  switch (state) {  
+    
+    case waiting:
+      if ( central ) {
+        digitalWrite(LEDB, LedRGBOnValue);  // TODO Buzz?
         DebugMessagePrintf( "Connected to peripheral device MAC: %s\n", central.address().c_str() );
+        state = bleConnected;
+      }
+      if (Serial && Serial.read() == 83) {
+        DebugMessagePrintf("USB connection established.\n");
+        state = sessionTransfer;
+      }
+      break;
 
-        // Turn on the Blue LED on to indicate the connection
-        digitalWrite(LEDB, LedRGBOnValue);
-        
-        while ( central.connected() ) {
-          BLE.poll();
-
-          if ( readIMU() && trainingOn) {
-            long currentTime = millis();
-            lastInterval = currentTime - lastTime;
-            if (lastInterval >= 200) {
-              doImuCalculations();
-              SaveCalculations(currentTime);
-            }
-          }
-        }
-
-        // Turn off the Blue LED to indicate lost of connection
+    case bleConnected:
+      if ( central.connected() ) BLE.poll();
+      else {
         digitalWrite(LEDB, LedRGBOffValue );
         DebugMessagePrintf( "Disconnected from central MAC: %s\n", central.address().c_str() );
-    }
+        state = waiting;
+      }
+      break;
+
+    case savingSession:
+      digitalWrite(LEDB, LedRGBOnValue );
+
+      if (readIMU()) {
+        long currentTime = millis();
+        lastInterval = currentTime - lastTime;
+        if (lastInterval >= 200) {
+          doImuCalculations();
+          SaveCalculations(currentTime);
+        }
+      }  
+
+      if ( !central.connected() ) {
+        digitalWrite(LEDB, LedRGBOffValue );
+        DebugMessagePrintf( "Disconnected from central MAC: %s\n", central.address().c_str() );
+        state = waiting;
+      }
+      break;
+
+    case sessionTransfer:
+      myBlink( LEDB, 500 );
+      DebugMessagePrintf( "USB connected" );
+      if (!Serial) {
+        DebugMessagePrintf( "USB disconnected" );
+        state = waiting;
+      }
+      break;
+
+    default:
+      break;
+  }
 }
+
