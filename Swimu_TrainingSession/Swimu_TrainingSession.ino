@@ -9,6 +9,7 @@
 #include <iostream>
 #include <chrono>
 #include <string>
+#include "Display.h"
 
 //I2C device address 0x6A
 const byte addressIMU = 0x6A;
@@ -21,7 +22,11 @@ long lastTime;
 long startTime;
 long lastInterval;
 
-// The sensor has 3 possible states
+// The sensor has 4 possible states
+//   . Waiting         > "Has no work", waiting for either a BLE or USB connection;
+//   . bleConnected    > Is connected via BLE to a device, waiting for orders;
+//   . savingSession   > Is printing calculations into a session file;
+//   . sessionTransfer > Is undergoing a FTP via USB with mobile device;
 enum {waiting, bleConnected, savingSession, sessionTransfer};
 unsigned char state = waiting; // What the sensor is doing
 
@@ -115,14 +120,10 @@ void onCurrentTimeServiceReceived(BLEDevice central, BLECharacteristic character
   if (characteristic == characteristicCurrentTimeService) {
     uint8_t value[20];
     int bytesRead = characteristic.readValue(value, 20);
-
-    uint16_t year  = (value[1] << 8) | value[0];
-    uint8_t month  = value[2];
-    uint8_t day    = value[3];
     
     if (SDready) {
       char dateTimeVal[19];
-      sprintf(dateTimeVal, "%04u-%02u-%02u %02u:%02u:%02u", year, month, day, value[4], value[5], value[6]);
+      sprintf(dateTimeVal, "%04u-%02u-%02u %02u:%02u:%02u", (value[1] << 8) | value[0], value[2], value[3], value[4], value[5], value[6]);
       prepareSession(dateTimeVal);
     }
   }
@@ -143,10 +144,12 @@ void setupSD(){
         DebugMessagePrintf("Create Directory failed\n");
       }
       File myFile = SD.open(String(DATA_DIR) + "/tosave.txt", FILE_WRITE);
-      myFile.seek(0);
-      myFile.print("0");
+      myFile.print("0\n0");
       myFile.close();
     }
+
+    if(SD.rmdir(String(DATA_DIR) + "/20230419")) DebugMessagePrintf("rem\n");
+
 
     SDready = true;
     Serial.println("All ready!\n");
@@ -175,8 +178,9 @@ void prepareSession(char* dateTimeVal) {
       toSaveFile.close();
 
       DebugMessagePrintf("\nTraining Started\n")
-      myBlink( LEDB, 1000 );
       calibrateIMU( 250, 250);
+      myBlink( LEDB, 500 );
+      digitalWrite(LEDB, LedRGBOnValue );
       startTime = millis();
       lastTime  = millis();
       state = savingSession;
@@ -203,11 +207,59 @@ void SaveCalculations(long timestamp) {
   lastTime = timestamp;
 }
 
+void sendFileList(){
+  File sessionsRoot = SD.open(String(DATA_DIR));
+  if (!sessionsRoot) {
+    DebugMessagePrintf( "Failed to open root!\n" );
+    return;
+  }
+
+  DebugMessagePrintf( "Files:\n" );
+  while (true) {
+    File file = sessionsRoot.openNextFile();
+    if (!file) {
+      break;
+    }
+
+    if (strcmp(file.name(), "TOSAVE.TXT") != 0) {
+      file.seek(0);
+      String date = file.readStringUntil('\n');
+      String name = String(file.name());
+      name        = name.substring(0, name.lastIndexOf("."));
+      Serial.println(String(name) + " - " + String(date));
+    }
+    file.close();
+  }
+
+  sessionsRoot.close();
+
+  Serial.println("End of list");
+}
+
+bool transferNextFile(String fileName){
+  // Open the file to transfer, send line by line
+  File toTransferFile = SD.open(String(DATA_DIR) + "/" + String(fileName) + ".txt");
+  if(toTransferFile) {  
+       
+    while (toTransferFile.available()) { 
+      Serial.println(toTransferFile.readStringUntil('\n'));
+    }
+
+    toTransferFile.close();
+    // Delete file
+    // SD.remove(String(DATA_DIR) + "/" + String(nextFileNum) + ".txt");
+
+    return true;
+  }
+  return false;
+}
+
 /************************* OTHER *********************************/
 void setup() {
-    DebugDelay( 1000 );
+    initializeDisplay();   
+    //DebugDelay( 1000 );
+    clearDisplay(2000);
     DebugSerialBeginNoBlock( 115200 );
-    Serial.begin(9600);
 
     DebugMessagePrintf( "Serial port is ready.\n" );
     DebugMessagePrintf( "Configuring Builtin LED...\n" );
@@ -224,7 +276,6 @@ void setup() {
         }
     }
 
-  //  usb.init();
     setupSD();
     setupBLE();
 }
@@ -293,21 +344,23 @@ void doImuCalculations() {
   yaw = map(complementaryYaw, -180, 180, 0, 255);
 }
 
+int i = 0;
 void loop() {
   BLEDevice central = BLE.central();
-      
   switch (state) {  
     
     case waiting:
+
       if ( central ) {
         digitalWrite(LEDB, LedRGBOnValue);  // TODO Buzz?
         DebugMessagePrintf( "Connected to peripheral device MAC: %s\n", central.address().c_str() );
         state = bleConnected;
       }
-      if (Serial && Serial.read() == 83) {
-        DebugMessagePrintf("USB connection established.\n");
+      
+      if (Serial.available()) {
         state = sessionTransfer;
       }
+
       break;
 
     case bleConnected:
@@ -320,7 +373,6 @@ void loop() {
       break;
 
     case savingSession:
-      digitalWrite(LEDB, LedRGBOnValue );
 
       if (readIMU()) {
         long currentTime = millis();
@@ -339,8 +391,20 @@ void loop() {
       break;
 
     case sessionTransfer:
-      myBlink( LEDB, 500 );
-      DebugMessagePrintf( "USB connected" );
+
+      if (Serial.available()) {
+        String message = Serial.readStringUntil('\n');
+
+        if (message.equals("Show file list")) { 
+          sendFileList();
+        } else if (message.toInt() != 0) {
+          myBlink( LEDB, 500 );
+          transferNextFile(message);
+        } else if (message.equals("End transfer")) { 
+          state = waiting;
+        }
+      }      
+
       if (!Serial) {
         DebugMessagePrintf( "USB disconnected" );
         state = waiting;
