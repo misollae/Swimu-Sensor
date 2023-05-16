@@ -4,6 +4,12 @@ Based on the low-cost wearable device called Swimu, this repository contains an 
 ## Setup
 - **Download or clone** this source code into a new directory;
 
+- **Find the Arduino directory on your computer:** which should be found at C:\Users\(user)\AppData\Local\Arduino15;
+
+- **Place the Utils library inside the libraries folder**;
+
+- **Continue to the packages\Seeeduino\hardware\mbed\2.9.1 directory and add the platform.local.txt file**;
+
 ## Running the Application on your Device
 You will now have the application installed on your phone and you'll be able to run it normally, without the cable connected.
 
