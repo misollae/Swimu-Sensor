@@ -10,8 +10,8 @@ Based on the low-cost wearable device called Swimu, this repository contains an 
 
 - **Continue to the packages\Seeeduino\hardware\mbed\2.9.1 directory and add the platform.local.txt file**;
 
-## Running the Application on your Device
-You will now have the application installed on your phone and you'll be able to run it normally, without the cable connected.
+## Uploading the Code
+Simply upload the code into your Arduino sensor, and everything will be ready to be used!
 
 ## Related Repositories
 To get the project fully working make sure you've completed setting up all of the following repositories:
