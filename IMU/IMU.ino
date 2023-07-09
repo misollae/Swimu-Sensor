@@ -29,7 +29,7 @@ float accelX,            accelY,             accelZ,            // units m/s/s i
       accRoll,           accPitch,           accYaw,            // units degrees (roll and pitch noisy, yaw not possible)
       complementaryRoll, complementaryPitch, complementaryYaw;  // units degrees (excellent roll, pitch, yaw minor drift)
 
-uint8_t roll, pitch, yaw;
+int roll, pitch, yaw;
 
 long lastTime;
 long lastSave = 0;
@@ -50,6 +50,9 @@ bool readIMU() {
   gyroX = lsm6ds33.readFloatGyroX();
   gyroY = lsm6ds33.readFloatGyroY();
   gyroZ = lsm6ds33.readFloatGyroZ();
+
+  //DebugMessagePrintf( "accelX=%5.2f, accelY=%5.2f, accelZ=%5.2f\n", accelX, accelY, accelZ);
+  //DebugMessagePrintf( "gyroX=%5.2f, gyroY=%5.2f, gyroZ=%5.2f\n", gyroX, gyroY, gyroZ);
   
   return true;
 }
@@ -89,7 +92,10 @@ void doImuCalculations() {
   accRoll = atan2(accelY, accelZ) * 180 / M_PI;
   accPitch = atan2(-accelX, sqrt(accelY * accelY + accelZ * accelZ)) * 180 / M_PI;
 
-  float lastFrequency = (float) 1000000.0 / lastInterval;
+  //DebugMessagePrintf( "gyroX=%5.2f, gyroY=%5.2f, gyroZ=%5.2f\n", gyroX, gyroY, gyroZ);  
+
+  float lastFrequency = (float) 1000000.0 / (float)lastInterval;
+
   gyroRoll = gyroRoll + (gyroX / lastFrequency);
   gyroPitch = gyroPitch + (gyroY / lastFrequency);
   gyroYaw = gyroYaw + (gyroZ / lastFrequency);
@@ -104,10 +110,20 @@ void doImuCalculations() {
 
   complementaryRoll  = 0.98 * complementaryRoll + 0.02 * accRoll;
   complementaryPitch = 0.98 * complementaryPitch + 0.02 * accPitch;
+  if ( complementaryYaw<0.0f ) {
+    complementaryYaw = complementaryYaw + 360.0f;
+  }
+  else {
+    if ( complementaryYaw>360.0f ) {
+      complementaryYaw = complementaryYaw - 360.0f;
+    }
+  }
 
-  roll = map(complementaryRoll, -180, 180, 0, 255);
-  pitch = map(complementaryPitch, -180, 180, 0, 255);
-  yaw = map(complementaryYaw, -180, 180, 0, 255);
+  roll  = map(complementaryRoll, -180, 180, 0, 360);
+  pitch = map(complementaryPitch, -180, 180, 0, 360);
+  //yaw   = map(complementaryYaw, -180, 180, 0, 360);
+
+  yaw = (int)complementaryYaw;
 }
 
 /**
@@ -140,12 +156,12 @@ void printCalculations(long period) {
   //  Serial.print(complementaryYaw);
   //  Serial.println("");
 
-    DebugMessagePrintf( "%d,%d,%d\n", roll, pitch, yaw );
+    //DebugMessagePrintf( "%d,%d,%d\n", roll, pitch, yaw );
     DebugMessagePrintf( "roll=%d,pitch=%d,yaw=%d,frequency=%5.2f Hz\n", roll, pitch, yaw, 1.0/(period*0.000001) );
 }
 
 void setup() {
-    DebugDelay( 10000 );
+    DebugDelay( 2000 );
     DebugSerialBegin( 115200 ); 
 
     wrote = false; 
@@ -182,6 +198,10 @@ void testRead() {
 
 void loop() {
     if ( readIMU() ) {
+        long currentTime = micros();
+        lastInterval = currentTime - lastTime;
+        lastTime = currentTime;
+        
         doImuCalculations();
         printCalculations( lastInterval );
     }

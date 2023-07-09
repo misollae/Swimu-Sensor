@@ -10,6 +10,7 @@
 #include <chrono>
 #include <string>
 #include "Display.h"
+#include <stdlib.h>
 
 //I2C device address 0x6A
 const byte addressIMU = 0x6A;
@@ -21,13 +22,14 @@ DataIMU dataIMU;
 long lastTime;
 long startTime;
 long lastInterval;
+long lastFlushTime;
 
 // The sensor has 4 possible states
 //   . Waiting         > "Has no work", waiting for either a BLE or USB connection;
 //   . bleConnected    > Is connected via BLE to a device, waiting for orders;
 //   . savingSession   > Is printing calculations into a session file;
 //   . sessionTransfer > Is undergoing a FTP via USB with mobile device;
-enum {waiting, bleConnected, savingSession, sessionTransfer};
+enum {waiting, savingSession, sessionTransfer};
 unsigned char state = waiting; // What the sensor is doing
 
 /************************* LED Status *********************************/
@@ -57,6 +59,7 @@ BLEDescriptor descriptorCurrentTimeService( characteristicCurrentTimeServiceGATT
 #define SD_PIN 3                           // PIN do cartão SD
 
 String sessionFileName;
+File sessionFile;
 float temperature, pressure, altitude;        
 float magnetic_x, magnetic_y, magnetic_z;
 float humidity;
@@ -67,7 +70,7 @@ float accelX,            accelY,             accelZ,            // units m/s/s i
       gyroCorrectedRoll, gyroCorrectedPitch, gyroCorrectedYaw,  // units degrees (expect minor drift)
       accRoll,           accPitch,           accYaw,            // units degrees (roll and pitch noisy, yaw not possible)
       complementaryRoll, complementaryPitch, complementaryYaw;  // units degrees (excellent roll, pitch, yaw minor drift)
-uint8_t roll, pitch, yaw;
+int roll, pitch, yaw;
 bool SDready;
 
 /************************* LED Status *********************************/
@@ -116,15 +119,22 @@ void setupBLE(){
 }
 
 void onCurrentTimeServiceReceived(BLEDevice central, BLECharacteristic characteristic) {
+  DebugMessagePrintf("\nReceived\n");
 
   if (characteristic == characteristicCurrentTimeService) {
-    uint8_t value[20];
-    int bytesRead = characteristic.readValue(value, 20);
-    
-    if (SDready) {
-      char dateTimeVal[19];
-      sprintf(dateTimeVal, "%04u-%02u-%02u %02u:%02u:%02u", (value[1] << 8) | value[0], value[2], value[3], value[4], value[5], value[6]);
-      prepareSession(dateTimeVal);
+    if (state == savingSession) {
+      endSession();
+    } else {
+      uint8_t value[20];
+      int bytesRead = characteristic.readValue(value, 20);
+
+      if (SDready) {
+        char fileDir[9];
+        char fileName[7];
+        sprintf(fileDir, "/%04u%02u%02u", (value[1] << 8) | value[0], value[2], value[3]);
+        sprintf(fileName, "/%02u%02u%02u", value[4], value[5], value[6]);
+        prepareSession(fileDir, fileName);
+      }
     }
   }
 }
@@ -148,63 +158,68 @@ void setupSD(){
       myFile.close();
     }
 
-    if(SD.rmdir(String(DATA_DIR) + "/20230419")) DebugMessagePrintf("rem\n");
-
+    //if(SD.rmdir(String(DATA_DIR) + "/20230419")) DebugMessagePrintf("rem\n");
 
     SDready = true;
     Serial.println("All ready!\n");
 }
 
-void prepareSession(char* dateTimeVal) {
-  DebugMessagePrintf("\nNow starting session file\n")
-
-  File toSaveFile = SD.open(String(DATA_DIR) + "/tosave.txt");
-  if(toSaveFile) { 
-    int sessionNum = toSaveFile.parseInt();
-    toSaveFile.close();
-    
-    sessionFileName = "/" + String(sessionNum) + ".txt";
-    File sessionFile = SD.open(String(DATA_DIR) + String(sessionFileName), FILE_WRITE);
-    if(sessionFile) { 
-      sessionFile.println(String(dateTimeVal));
-      sessionFile.println("timestamp ; roll ; pitch ; yaw");
-      sessionFile.close();
-
-      sessionNum++;
-      if (sessionNum > 999999) sessionNum = 0;
-      toSaveFile = SD.open(String(DATA_DIR) + "/tosave.txt", O_RDWR);
-      toSaveFile.seek(0);
-      toSaveFile.print(sessionNum);
-      toSaveFile.close();
-
-      DebugMessagePrintf("\nTraining Started\n")
-      calibrateIMU( 250, 250);
-      myBlink( LEDB, 500 );
-      digitalWrite(LEDB, LedRGBOnValue );
-      startTime = millis();
-      lastTime  = millis();
-      state = savingSession;
-      return;
-    }
+void prepareSession(char* fileDir, char* fileName) {
+  if(!SD.exists(String(DATA_DIR) + String(fileDir))) {
+    SD.mkdir(String(DATA_DIR) + String(fileDir));
   }
+  sessionFileName = String(fileDir) + String(fileName) + ".txt";
+  sessionFile = SD.open(String(DATA_DIR) + String(fileDir) + String(fileName) + ".txt", FILE_WRITE);
+  
+  if(sessionFile) { 
+    sessionFile.println("timestamp ; roll ; pitch ; yaw");
+    DebugMessagePrintf("\nStarted current session\n")
+    calibrateIMU( 250, 250);
+    digitalWrite(LEDB, LedRGBOnValue);
+    startTime = micros();
+    lastFlushTime = 0;
+    state = savingSession;
+    return;
+  }
+
   DebugMessagePrintf( "Session failed to start!\n" );
   digitalWrite(LEDB, LedRGBOffValue );
   state = waiting;
 }
 
-void SaveCalculations(long timestamp) {
+void endSession() {
+  sessionFile.close();
+  DebugMessagePrintf( "Ended current session");
+  digitalWrite(LEDB, LedRGBOffValue );
+  state = waiting;
+  return;
+}
 
-  File sessionFile = SD.open(String(DATA_DIR) + String(sessionFileName), FILE_WRITE);
+void SaveCalculations(long timestamp) {
 
   if(!sessionFile) { 
       DebugMessagePrintf( "Failed to save!\n" );
       myBlink( LEDR, 500 );
    } else {
-      sessionFile.println(String(timestamp  - startTime) + " ; " + String(roll) + " ; " + String(pitch) + " ; " + String(yaw));
-      sessionFile.close();
+      unsigned long saveMillis = (unsigned long)((timestamp  - startTime) / 1000);   
+      sessionFile.print("\n"); 
+      sessionFile.print(String(saveMillis));
+      sessionFile.print(';');
+      sessionFile.print(String(roll));
+      sessionFile.print(';');
+      sessionFile.print(String(pitch));
+      sessionFile.print(';');
+      sessionFile.println(String(yaw));
+
+      //DebugMessagePrintf(String(saveMillis) + " ; " + String(roll) + " ; " + String(pitch) + " ; " + String(yaw) + "\n");
+
+      if (saveMillis - lastFlushTime >= 60000) {
+        sessionFile.flush();
+        DebugMessagePrintf( "\nFlushed!\n" );
+        lastFlushTime = saveMillis;
+      }
    }
    
-  lastTime = timestamp;
 }
 
 void sendFileList(){
@@ -215,40 +230,48 @@ void sendFileList(){
   }
 
   DebugMessagePrintf( "Files:\n" );
+  sendFolderFileList(sessionsRoot, "");
+  Serial.println("End of list");
+}
+
+void sendFolderFileList(File dir, String parentDir) {
   while (true) {
-    File file = sessionsRoot.openNextFile();
+    File file = dir.openNextFile();
     if (!file) {
       break;
     }
 
-    if (strcmp(file.name(), "TOSAVE.TXT") != 0) {
-      file.seek(0);
-      String date = file.readStringUntil('\n');
-      String name = String(file.name());
-      name        = name.substring(0, name.lastIndexOf("."));
-      Serial.println(String(name) + " - " + String(date));
+    if (file.isDirectory()) {
+      String currentDir = parentDir + "/" + file.name();
+      sendFolderFileList(file, currentDir);
+    } else if (strcmp(file.name(), "TOSAVE.TXT") != 0) {
+      String pathName = parentDir + "/" + file.name();
+      Serial.println(pathName.substring(0, pathName.lastIndexOf(".")));
     }
     file.close();
   }
-
-  sessionsRoot.close();
-
-  Serial.println("End of list");
 }
 
 bool transferNextFile(String fileName){
-  // Open the file to transfer, send line by line
-  File toTransferFile = SD.open(String(DATA_DIR) + "/" + String(fileName) + ".txt");
+  File toTransferFile = SD.open(String(DATA_DIR) + String(fileName) + ".txt");
   if(toTransferFile) {  
-       
-    while (toTransferFile.available()) { 
-      Serial.println(toTransferFile.readStringUntil('\n'));
-    }
+    size_t bufferSize = 1024; 
+    uint8_t buffer[bufferSize];
+    size_t bytesRead;
+    
+    do {
+      bytesRead = toTransferFile.read(buffer, bufferSize);
+
+      if (buffer[0] == '\n' || buffer[0] == '\r') Serial.write(" ");
+
+      Serial.write(buffer, bytesRead);
+      if (buffer[bytesRead - 1] == '\n' || buffer[bytesRead - 1] == '\r') Serial.write(" ");
+
+    } while (toTransferFile.available() || bytesRead > 0);
 
     toTransferFile.close();
-    // Delete file
-    // SD.remove(String(DATA_DIR) + "/" + String(nextFileNum) + ".txt");
-
+    Serial.println("End of file");
+    SD.remove(String(DATA_DIR) + String(fileName) + ".txt");
     return true;
   }
   return false;
@@ -257,7 +280,6 @@ bool transferNextFile(String fileName){
 /************************* OTHER *********************************/
 void setup() {
     initializeDisplay();   
-    //DebugDelay( 1000 );
     clearDisplay(2000);
     DebugSerialBeginNoBlock( 115200 );
 
@@ -338,10 +360,19 @@ void doImuCalculations() {
 
   complementaryRoll  = 0.98 * complementaryRoll + 0.02 * accRoll;
   complementaryPitch = 0.98 * complementaryPitch + 0.02 * accPitch;
+  if ( complementaryYaw<0.0f ) {
+    complementaryYaw = complementaryYaw + 360.0f;
+  }
+  else {
+    if ( complementaryYaw>360.0f ) {
+      complementaryYaw = complementaryYaw - 360.0f;
+    }
+  }
 
-  roll = map(complementaryRoll, -180, 180, 0, 255);
-  pitch = map(complementaryPitch, -180, 180, 0, 255);
-  yaw = map(complementaryYaw, -180, 180, 0, 255);
+
+  roll  = map(complementaryRoll, -180, 180, 0, 360);
+  pitch = map(complementaryPitch, -180, 180, 0, 360);
+  yaw   = (int)complementaryYaw;
 }
 
 int i = 0;
@@ -352,9 +383,7 @@ void loop() {
     case waiting:
 
       if ( central ) {
-        digitalWrite(LEDB, LedRGBOnValue);  // TODO Buzz?
-        DebugMessagePrintf( "Connected to peripheral device MAC: %s\n", central.address().c_str() );
-        state = bleConnected;
+        if ( central.connected() ) BLE.poll();
       }
       
       if (Serial.available()) {
@@ -363,31 +392,21 @@ void loop() {
 
       break;
 
-    case bleConnected:
-      if ( central.connected() ) BLE.poll();
-      else {
-        digitalWrite(LEDB, LedRGBOffValue );
-        DebugMessagePrintf( "Disconnected from central MAC: %s\n", central.address().c_str() );
-        state = waiting;
-      }
-      break;
-
     case savingSession:
+      if ( central ) {
+        if ( central.connected() ) BLE.poll();
+      }
 
       if (readIMU()) {
-        long currentTime = millis();
+        long currentTime = micros();
         lastInterval = currentTime - lastTime;
-        if (lastInterval >= 200) {
-          doImuCalculations();
-          SaveCalculations(currentTime);
-        }
-      }  
+        lastTime = currentTime;
+        doImuCalculations();
+        //DebugMessagePrintf("\n" + String(roll) + " " + String(pitch) + " " + String(yaw) + "\n");
+        SaveCalculations(currentTime);
+      } 
 
-      if ( !central.connected() ) {
-        digitalWrite(LEDB, LedRGBOffValue );
-        DebugMessagePrintf( "Disconnected from central MAC: %s\n", central.address().c_str() );
-        state = waiting;
-      }
+
       break;
 
     case sessionTransfer:
@@ -397,7 +416,7 @@ void loop() {
 
         if (message.equals("Show file list")) { 
           sendFileList();
-        } else if (message.toInt() != 0) {
+        } else if (message.length() == 16) {
           myBlink( LEDB, 500 );
           transferNextFile(message);
         } else if (message.equals("End transfer")) { 
